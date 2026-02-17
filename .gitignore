@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual Environment
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Database
+*.db
+
+# Model files (large)
+models/*.pkl
+
+# Data cache
+tickers.csv
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test files
+test_*.py
+install_gpu.sh
