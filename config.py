@@ -99,7 +99,30 @@ class ScanConfig:
     ENSEMBLE_BETA: float = 0.3    # ルールベーススコアの重み
 
 
+class TFTConfig:
+    """TFTモデル設定"""
+    MAX_ENCODER_LENGTH = 60  # 過去60日分を入力
+    MAX_PREDICTION_LENGTH = 5 # 未来5日分を予測
+    BATCH_SIZE = 64
+    MAX_EPOCHS = 30
+    LEARNING_RATE = 0.03
+    HIDDEN_SIZE = 16
+    ATTENTION_HEAD_SIZE = 1
+    DROPOUT = 0.1
+    HIDDEN_CONTINUOUS_SIZE = 8
+    LSTM_LAYERS = 1
+    MODEL_DIR = "models/tft_checkpoints"
+
+class RLConfig:
+    """強化学習 (DRL) 設定"""
+    TIMESTEPS = 20000  # 学習ステップ数
+    LOOKBACK_WINDOW = 30 # 観測する過去期間
+    CASH_INITIAL = 1_000_000
+    TRANSACTION_COST_PCT = 0.001 # 取引手数料 0.1%
+    MODEL_DIR = "models/rl_agents"
+
 class APIConfig:
+    # 既存のコード...
     """API・キャッシュ設定"""
     CHUNK_SIZE: int = 50
     WAIT_SEC: float = 1.0

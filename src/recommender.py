@@ -7,14 +7,22 @@ import json
 import time
 import pandas as pd
 import numpy as np
-from config import ScanConfig, ModelConfig
+from typing import List, Dict, Tuple
+import joblib
+import os
+import torch
+from pytorch_forecasting.models.temporal_fusion_transformer import TemporalFusionTransformer
+
+from config import ModelConfig, ScanConfig, TFTConfig
+from src.ml_model import SurgePredictor
+
+from src.dataset import create_tft_dataset
 from src.data_loader import get_stock_data, fetch_jpx_tickers, get_stock_data_cached
 from src.feature_engineering import FeatureEngineer
 from src.analyzer import (
     add_technical_indicators, analyze_term_signal,
     analyze_speculative_signal, get_rule_based_score
 )
-from src.ml_model import SurgePredictor
 from src import db
 
 
@@ -25,6 +33,123 @@ class StockRecommender:
         self.fe = FeatureEngineer()
         self.model = model
         self.config = ScanConfig()
+        self.tft_model = None
+
+    def load_tft_model(self, model_path: str = None):
+        """TFTモデルをロードする"""
+        if model_path is None:
+            # 最新のチェックポイントを探す
+            if os.path.exists(TFTConfig.MODEL_DIR):
+                checkpoints = sorted([
+                    os.path.join(TFTConfig.MODEL_DIR, f) 
+                    for f in os.listdir(TFTConfig.MODEL_DIR) 
+                    if f.endswith('.ckpt')
+                ])
+                if checkpoints:
+                    model_path = checkpoints[-1]
+        
+        if model_path and os.path.exists(model_path):
+            try:
+                self.tft_model = TemporalFusionTransformer.load_from_checkpoint(model_path)
+                print(f"Loaded TFT model from {model_path}")
+                return True
+            except Exception as e:
+                print(f"Failed to load TFT model: {e}")
+                return False
+        return False
+
+    def predict_tft(self, ticker: str, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        指定銘柄の未来5日間の価格推移を予測する
+        Args:
+            ticker: 銘柄コード
+            df: 日足データ (Date, Open, High, Low, Close, Volume)
+        Returns:
+            予測結果DataFrame (Date, Predicted_Mean, Lower, Upper)
+        """
+        if self.tft_model is None:
+            if not self.load_tft_model():
+                return pd.DataFrame()
+        
+        # データセット作成 (推論用なので直近データのみでOKだが、Encoder長が必要)
+        # create_tft_datasetはDataLoadersを返すが、ここではデータセット自体が必要
+        # predictメソッドはDataLoaderまたはDataFrameを受け取れる
+        
+        # 前処理: Date型変換など
+        df = df.copy()
+        if 'Date' not in df.columns and df.index.name == 'Date':
+            df = df.reset_index()
+        elif 'Date' not in df.columns:
+             # IndexがDateでない、かつDateカラムもない場合はreset_indexしてみる
+             df = df.reset_index()
+             # それでもDateがない場合はrenameを試みる (index -> Date)
+             if 'Date' not in df.columns:
+                 df = df.rename(columns={'index': 'Date'})
+
+        df['ticker'] = ticker # ticker列追加
+        
+        # Dateがタイムゾーン付きの場合、TFTでエラーになる可能性があるためtz_localize(None)する
+        if pd.api.types.is_datetime64_any_dtype(df['Date']):
+             if df['Date'].dt.tz is not None:
+                 df['Date'] = df['Date'].dt.tz_localize(None)
+        else:
+             df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None)
+            
+        # time_idx作成 (簡易版)
+        min_date = df['Date'].min()
+        df['time_idx'] = (df['Date'] - min_date).dt.days
+        
+        # 特徴量 (Date derived)
+        df['month'] = df['Date'].dt.month.astype(str).astype('category')
+        df['day'] = df['Date'].dt.day.astype(str).astype('category')
+        df['day_of_week'] = df['Date'].dt.dayofweek.astype(str).astype('category')
+
+        # 最新のデータを含むようにフィルタリング (学習時と同じ長さが必要)
+        # Predictionには Encoder Length + Prediction Length 分のデータが必要
+        # ただし、Unknown Reals (Closeなど) は未来の値は不要 (NaNでよい、または自動補完される)
+        
+        # ここではcreate_tft_datasetを再利用してDataLoaderを作るのが安全
+        try:
+             # バッチサイズ1で作成
+            _, _, _, predict_dataloader = create_tft_dataset(
+                df, 
+                max_encoder_length=TFTConfig.MAX_ENCODER_LENGTH,
+                max_prediction_length=TFTConfig.MAX_PREDICTION_LENGTH,
+                batch_size=1
+            )
+            
+            # 推論実行
+            # mode="quantiles" で (batch_size, prediction_length, n_quantiles)
+            raw_predictions = self.tft_model.predict(predict_dataloader, mode="quantiles", return_x=True)
+            
+            # 結果整形
+            predictions = raw_predictions.output
+            # predictions shape: [1, 5, 7] (1 batch, 5 days, 7 quantiles)
+            
+            # 予測開始日 (x['decoder_time_idx'] の最初の日付に対応)
+            # decoder_time_idxは time_idx の続き
+            last_date = df['Date'].max()
+            future_dates = pd.date_range(start=last_date + pd.Timedelta(days=1), periods=TFTConfig.MAX_PREDICTION_LENGTH, freq='B') # 営業日換算が必要だが簡易的に
+            
+            # Quantiles: 0.02, 0.1, 0.25, 0.5, 0.75, 0.9, 0.98
+            # default output_size=7
+            
+            pred_median = predictions[0, :, 3].numpy() # 0.5 (Median)
+            pred_lower = predictions[0, :, 1].numpy()  # 0.1 (Lower bound)
+            pred_upper = predictions[0, :, 5].numpy()  # 0.9 (Upper bound)
+            
+            result_df = pd.DataFrame({
+                "Date": future_dates[:len(pred_median)], # 長さが合うように
+                "Predicted_Mean": pred_median,
+                "Lower_Bound": pred_lower,
+                "Upper_Bound": pred_upper
+            })
+            
+            return result_df
+            
+        except Exception as e:
+            print(f"TFT prediction error for {ticker}: {e}")
+            return pd.DataFrame()
 
     def scan_with_ml(self, tickers: list, progress_callback=None) -> pd.DataFrame:
         """

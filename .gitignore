@@ -19,6 +19,11 @@ venv/
 
 # Model files (large)
 models/*.pkl
+models/*.ckpt
+models/*.zip
+lightning_logs/
+models/tft_checkpoints/
+models/rl_agents/
 
 # Data cache
 tickers.csv

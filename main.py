@@ -31,7 +31,10 @@ from src.ml_model import SurgePredictor
 from src.recommender import StockRecommender
 from src.utils import validate_ticker_symbol, plot_stock_chart
 from src import db
-
+from src.trainer import TFTTrainer
+from src.rl.agent import PortfolioOptimizer
+from config import TFTConfig, RLConfig
+import plotly.graph_objects as go
 # ───────────────────────────────────────────
 # Page Config
 # ───────────────────────────────────────────
@@ -88,6 +91,10 @@ if model.model is not None and model.metrics_:
     m = model.metrics_
     st.sidebar.markdown(f"- AUC: {m.get('auc_roc', 0):.3f}")
     st.sidebar.markdown(f"- P@{ModelConfig.TOP_K}: {m.get('precision_at_k', 0):.3f}")
+
+# TFT Model Status
+tft_status = "✅ 学習済み" if os.path.exists(TFTConfig.MODEL_DIR) and any(f.endswith('.ckpt') for f in os.listdir(TFTConfig.MODEL_DIR)) else "⚠️ 未学習"
+st.sidebar.markdown(f"**TFTモデル状態**: {tft_status}")
 
 # Train Button
 if st.sidebar.button("🧠 モデル学習/再学習"):
@@ -246,6 +253,60 @@ if st.sidebar.button("🧠 モデル学習/再学習"):
             else:
                 st.error("学習データが不足しています")
                 status.update(label="データ不足", state="error")
+    
+# TFT Train Button
+if st.sidebar.button("📈 TFT時系列学習 (GPU推奨)"):
+    with st.sidebar.status("TFTモデル学習中...", expanded=True) as status:
+        st.write("データ準備中...")
+        tickers_df = load_tickers()
+        
+        # TFTは時系列データが必要なので、主要銘柄から長期間のデータを取得
+        # 全銘柄は重すぎるので、上位銘柄や注目セクターを中心に
+        # ここではデモとして、Liquidityの高いTop 50銘柄を使用
+        target_tickers = tickers_df.head(50)['Ticker'].tolist()
+        
+        st.write(f"{len(target_tickers)}銘柄のデータを取得中...")
+        
+        import yfinance as yf
+        all_data_list = []
+        
+        # Batch download
+        data = yf.download(target_tickers, period="2y", progress=False, threads=True)
+        
+        if not data.empty:
+            if isinstance(data.columns, pd.MultiIndex):
+                for t in target_tickers:
+                    try:
+                        df_t = data.xs(t, axis=1, level=1).dropna()
+                        if len(df_t) > TFTConfig.MAX_ENCODER_LENGTH + TFTConfig.MAX_PREDICTION_LENGTH:
+                            df_t['ticker'] = t
+                            df_t = df_t.reset_index()
+                            all_data_list.append(df_t)
+                    except:
+                        pass
+            elif len(target_tickers) == 1:
+                data['ticker'] = target_tickers[0]
+                data = data.reset_index()
+                all_data_list.append(data)
+                
+        if all_data_list:
+            df_combined = pd.concat(all_data_list, ignore_index=True)
+            st.write(f"学習データ: {len(df_combined)} records")
+            
+            st.write("学習開始 (数分かかります)...")
+            trainer = TFTTrainer()
+            best_model, _ = trainer.train(
+                df_combined,
+                max_epochs=TFTConfig.MAX_EPOCHS,
+                batch_size=TFTConfig.BATCH_SIZE,
+                learning_rate=TFTConfig.LEARNING_RATE
+            )
+            
+            st.success("TFT学習完了!")
+            status.update(label="学習完了!", state="complete")
+        else:
+            st.error("データ取得失敗")
+            status.update(label="データ不足", state="error")
 
 st.sidebar.divider()
 
@@ -266,10 +327,12 @@ else:
 # ───────────────────────────────────────────
 # Tabs
 # ───────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📌 個別銘柄分析",
     "🔍 セクター別スクリーニング",
     "🚀 急騰候補AI検知",
+    "📈 時系列予測 (TFT)",
+    "⚖️ ポートフォリオ最適化 (RL)",
     "📊 バックテスト",
     "⭐ ウォッチリスト"
 ])
@@ -499,9 +562,173 @@ with tab3:
                 st.info("条件に合う銘柄が見つかりませんでした")
 
 # ═══════════════════════════════════════════
-# Tab 4: バックテスト
+# Tab 4: TFT 時系列予測
 # ═══════════════════════════════════════════
 with tab4:
+    st.header("📈 TFT 時系列予測")
+    st.markdown("Temporal Fusion Transformerによる、未来5日間の株価推移予測（予測区間付き）を表示します。")
+    
+    col_tft1, col_tft2 = st.columns([1, 3])
+    with col_tft1:
+        tft_ticker = st.text_input("Ticker Symbol", value="7203.T", key="tft_ticker")
+        tft_btn = st.button("🔮 予測実行", key="tft_btn")
+        
+    if tft_btn:
+        with st.spinner("予測中..."):
+            # 直近データ取得
+            df_latest = get_stock_data(tft_ticker, period="6mo")
+            
+            if df_latest is not None and not df_latest.empty:
+                # 推論実行
+                pred_df = recommender.predict_tft(tft_ticker, df_latest)
+                
+                if not pred_df.empty:
+                    st.success("予測完了!")
+                    
+                    # グラフ描画
+                    fig = go.Figure()
+                    
+                    # 実測値 (直近30日)
+                    recent = df_latest.iloc[-30:]
+                    fig.add_trace(go.Scatter(
+                        x=recent.index, y=recent['Close'],
+                        mode='lines+markers', name='実測値',
+                        line=dict(color='gray')
+                    ))
+                    
+                    # 予測値
+                    fig.add_trace(go.Scatter(
+                        x=pred_df['Date'], y=pred_df['Predicted_Mean'],
+                        mode='lines+markers', name='予測(中央値)',
+                        line=dict(color='blue', width=2)
+                    ))
+                    
+                    # 信頼区間 (Fan Chart style)
+                    fig.add_trace(go.Scatter(
+                        x=pd.concat([pred_df['Date'], pred_df['Date'][::-1]]),
+                        y=pd.concat([pred_df['Upper_Bound'], pred_df['Lower_Bound'][::-1]]),
+                        fill='toself',
+                        fillcolor='rgba(0,100,255,0.2)',
+                        line=dict(color='rgba(255,255,255,0)'),
+                        name='予測区間 (10-90%)'
+                    ))
+                    
+                    fig.update_layout(
+                        title=f"{tft_ticker} - 5日間価格予測",
+                        xaxis_title="Date", yaxis_title="Price",
+                        height=500
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    # 数値表示
+                    st.write("予測詳細:")
+                    st.dataframe(pred_df)
+                    
+                else:
+                    st.error("予測に失敗しました。モデルがロードできないか、データ処理エラーです。")
+            else:
+                st.error("データ取得に失敗しました。")
+
+# ═══════════════════════════════════════════
+# Tab 5: ポートフォリオ最適化 (RL)
+# ═══════════════════════════════════════════
+with tab5:
+    st.header("⚖️ ポートフォリオ最適化 (DRL)")
+    st.markdown("""
+    **Deep Reinforcement Learning (PPO)** を用いて、
+    指定された銘柄群に対する最適な資産配分（ポートフォリオ）を提案します。
+    過去期間のリスク・リターンを学習し、シャープレシオの最大化を目指します。
+    """)
+    
+    # 銘柄選択
+    rl_tickers = []
+    
+    # ウォッチリストから選択
+    wl = db.get_watchlist()
+    wl_options = []
+    if not wl.empty:
+        wl_options = wl['ticker'].tolist()
+    
+    col_rl1, col_rl2 = st.columns([1, 1])
+    with col_rl1:
+        selected_wl = st.multiselect("ウォッチリストから選択", wl_options, default=wl_options[:5] if wl_options else None)
+        rl_tickers.extend(selected_wl)
+        
+    with col_rl2:
+        manual_tickers = st.text_area("その他 (カンマ区切り)", value="7203.T, 9984.T, 6758.T")
+        if manual_tickers:
+            for t in manual_tickers.split(","):
+                t = t.strip()
+                if validate_ticker_symbol(t) and t not in rl_tickers:
+                    rl_tickers.append(t)
+    
+    rl_tickers = list(set(rl_tickers))  # 重複排除
+    
+    if len(rl_tickers) < 2:
+        st.warning("最適化には少なくとも2つの銘柄が必要です。")
+    else:
+        st.write(f"対象銘柄 ({len(rl_tickers)}): {', '.join(rl_tickers)}")
+        
+        if st.button("⚖️ 最適化実行 (学習開始)", key="rl_optimize"):
+            with st.spinner("データ取得 & RLエージェント学習中... (数分かかります)"):
+                # データ取得
+                import yfinance as yf
+                data = yf.download(rl_tickers, period="2y", progress=False, threads=True)
+                
+                if not data.empty and len(data) > RLConfig.LOOKBACK_WINDOW + 100:
+                    # Close価格のみ抽出してDataFrame化 (MultiIndex対応)
+                    price_df = pd.DataFrame()
+                    if isinstance(data.columns, pd.MultiIndex):
+                        for t in rl_tickers:
+                            try:
+                                s = data.xs(t, axis=1, level=1)['Close']
+                                price_df[t] = s
+                            except:
+                                pass
+                    elif len(rl_tickers) == 1: # これはありえないが念のため
+                         price_df[rl_tickers[0]] = data['Close']
+                         
+                    price_df.dropna(inplace=True)
+                    
+                    if len(price_df.columns) < 2:
+                        st.error("有効な価格データが2銘柄以上揃いませんでした。")
+                    else:
+                        st.write(f"学習データ期間: {price_df.index.min().date()} ~ {price_df.index.max().date()} ({len(price_df)} records)")
+                        
+                        # 学習実行
+                        optimizer = PortfolioOptimizer()
+                        # 学習ステップ数を調整 (デモ用に短くするかconfig通りか)
+                        optimizer.train(price_df, timesteps=10000) # デモ用に短縮
+                        
+                        st.success("学習完了! 最適配分を算出中...")
+                        
+                        # 推論 (直近データに基づく最適配分)
+                        weights = optimizer.predict(price_df)
+                        
+                        # 結果表示
+                        w_df = pd.DataFrame(list(weights.items()), columns=['Ticker', 'Weight'])
+                        w_df = w_df[w_df['Weight'] > 0.01].sort_values('Weight', ascending=False) # 1%以下は省略
+                        
+                        c1, c2 = st.columns([1, 1])
+                        with c1:
+                            st.dataframe(w_df.style.format({'Weight': '{:.1%}'}))
+                        
+                        with c2:
+                            # 円グラフ
+                            fig = go.Figure(data=[go.Pie(labels=w_df['Ticker'], values=w_df['Weight'], hole=.3)])
+                            fig.update_layout(title_text="推奨ポートフォリオ配分")
+                            st.plotly_chart(fig, use_container_width=True)
+                            
+                        # 効率的フロンティア（イメージ）やバックテストへの誘導など
+                        st.info("💡 この配分に基づき、バックテストタブで検証を行うことを推奨します。")
+                        
+                else:
+                    st.error("データ取得に失敗したか、期間が短すぎます。")
+
+# ═══════════════════════════════════════════
+# Tab 6: バックテスト
+# ═══════════════════════════════════════════
+with tab6:
     st.header("📊 バックテスト")
     st.markdown("推薦システムの過去パフォーマンスを検証します。")
 
@@ -563,9 +790,9 @@ with tab4:
                 st.plotly_chart(fig, use_container_width=True)
 
 # ═══════════════════════════════════════════
-# Tab 5: ウォッチリスト
+# Tab 7: ウォッチリスト
 # ═══════════════════════════════════════════
-with tab5:
+with tab7:
     st.header("⭐ ウォッチリスト管理")
 
     # 追加フォーム

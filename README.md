@@ -16,6 +16,8 @@ LightGBM機械学習 × ルールベーステクニカル分析のアンサン�
 | 機能 | 説明 |
 |------|------|
 | 🤖 **ML急騰確率予測** | LightGBMで64特徴量から5日後+5%急騰確率を推定 |
+| 📉 **TFT時系列予測 (Phase 2)** | Temporal Fusion Transformerで未来5日間の詳細な株価推移と予測区間を表示 |
+| ⚖️ **DRLポートフォリオ最適化 (Phase 3)** | PPO強化学習でシャープレシオを最大化する最適な資産配分を提案 |
 | 📊 **テクニカル分析** | RSI / SMA / MACD / ボリンジャーバンドによるシグナル検出 |
 | 🔍 **セクター別スクリーニング** | 東証全セクターからスコアランキング |
 | 🔥 **仕手株検知** | 出来高急増パターンの自動検出 |
@@ -85,6 +87,39 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
+<details>
+<summary>requirements.txt の内容</summary>
+
+```text
+# Core
+streamlit>=1.30
+pandas>=2.0
+numpy>=1.24
+plotly>=5.15
+
+# Data
+yfinance>=0.2.30
+xlrd>=2.0
+openpyxl>=3.1
+
+# Technical Analysis
+ta>=0.10
+
+# Machine Learning
+lightgbm>=4.0
+pytorch-forecasting>=1.0.0
+pytorch-lightning>=2.0.0
+torch>=2.0.0
+tensorboard
+scikit-learn
+statsmodels
+joblib>=1.3
+stable-baselines3>=2.0.0
+gymnasium>=0.29.0
+shimmy>=1.0.0
+```
+</details>
+
 ### 起動
 
 ```bash
@@ -101,14 +136,29 @@ streamlit run main.py
 2. 層化サンプリング＋低位株重点で約200銘柄のデータを自動収集
 3. 64特徴量の生成 → LightGBMモデルの学習が自動実行されます
 
-### 2. 急騰候補AI検知
-1. **「🚀 急騰候補AI検知」** タブを開く
-2. スキャンモード（セクター指定 / 仕手株検知）を選択
-3. **「AIスキャン開始」** ボタンで推薦ランキングを取得
+### 2. AI急騰検知
+1. サイドバーで「モデル学習」を実行（初回のみ）
+2. 「急騰候補AI検知」タブでセクターを選択してスキャン
+3. 推薦された銘柄のチャートやMLスコアを確認
 
-### 3. 個別銘柄分析
+### 3. TFT時系列予測 (New!)
+1. サイドバーで「TFT時系列学習」を実行（GPU推奨）
+2. 「時系列予測 (TFT)」タブで銘柄コードを入力
+3. 未来5日間の予測株価と信頼区間（Fan Chart）を確認
+
+### 4. DRLポートフォリオ最適化 (New!)
+1. 「ポートフォリオ最適化 (RL)」タブを開く
+2. ウォッチリストから銘柄を選択（または個別入力）
+3. 「最適化実行」をクリック → AIが学習を行い、最適な資産配分を円グラフで提案
+
+### 5. 個別銘柄分析
 1. **「📌 個別銘柄分析」** タブでティッカーコード入力（例: `7203.T`）
 2. チャート + ML急騰確率 + シグナル分析を表示
+
+### 6. バックテスト
+1. **「📊 バックテスト」** タブを開く
+2. 期間や戦略を設定し、バックテストを実行
+3. シャープレシオ、最大ドローダウン、勝率などを確認
 
 ## 🧠 MLパイプライン
 
@@ -145,12 +195,6 @@ class ScanConfig:
     MAX_PRICE = 1000            # 低位株しきい値 (円)
     MIN_VOLUME = 100000         # 最低出来高
 ```
-
-## 🛣️ ロードマップ
-
-- [x] **Phase 1 (MVP)**: LightGBM + ルールベース アンサンブル推薦
-- [ ] **Phase 2**: Temporal Fusion Transformer (TFT) 多段階予測
-- [ ] **Phase 3**: DRL強化学習によるポートフォリオ最適化
 
 ## ⚠️ 免責事項
 
