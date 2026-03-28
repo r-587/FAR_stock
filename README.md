@@ -76,7 +76,7 @@ FAR_stock/
 
 ```bash
 # リポジトリをクローン
-git clone https://github.com/<your-username>/FAR_stock.git
+git clone https://github.com/r-587/FAR_stock.git
 cd FAR_stock
 
 # 仮想環境を作成
